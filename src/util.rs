@@ -60,21 +60,27 @@ pub struct GlState {
     pub wasdsp_pressed: [bool; 5],
     pub left_click: bool,
     pub last_cursor_pos: (f32, f32),
+    pub def_vshader_id: GLuint,
+    pub def_fshader_id: GLuint,
+    pub def_pipeline: GLuint,
+    pub offbo: GLuint,
+    pub offtex: GLuint,
+    pub blurtex: GLuint,
+    pub off_depth_tex: GLuint,
+    pub fovy: f32,
+    pub near: f32,
+    pub far: f32,
+    pub clear_color: [GLfloat; 4],
+    pub clear_depth: GLfloat,
 }
 
-pub fn setup_glfw() -> (
-    glfw::Glfw,
-    glfw::PWindow,
-    glfw::GlfwReceiver<(f64, glfw::WindowEvent)>,
-) {
+pub fn setup_glfw() -> (glfw::Glfw, glfw::PWindow, glfw::GlfwReceiver<(f64, glfw::WindowEvent)>) {
     // Initialize glfw
-    glfw::init_hint(InitHint::Platform(glfw::Platform::X11));
+    glfw::init_hint(InitHint::Platform(glfw::Platform::Win32));
     let mut glfw = glfw::init(glfw_error_callback).unwrap();
 
     // Specify OpenGL version
-    glfw.window_hint(glfw::WindowHint::OpenGlProfile(
-        glfw::OpenGlProfileHint::Core,
-    ));
+    glfw.window_hint(glfw::WindowHint::OpenGlProfile(glfw::OpenGlProfileHint::Core));
     glfw.window_hint(glfw::WindowHint::ContextVersionMajor(4));
     glfw.window_hint(glfw::WindowHint::ContextVersionMinor(6));
     glfw.window_hint(glfw::WindowHint::OpenGlDebugContext(true));
@@ -91,7 +97,7 @@ pub fn setup_glfw() -> (
     window.set_mouse_button_polling(true);
     window.set_cursor_pos_polling(true);
     // Load OpenGL functions
-    gl::load_with(|symbol| window.get_proc_address(symbol).unwrap() as *const _);
+    gl::load_with(|symbol| window.get_proc_address(symbol).map_or(std::ptr::null(), |p| p as *const _));
     // Set debug context
     unsafe {
         // Callback is called immediately when an error happens
@@ -209,25 +215,11 @@ pub fn init_mesh(path: &str) -> Mesh {
         // Normal (tightly packed vec3)
         gl::VertexArrayVertexBuffer(vao_id, 1, vbo_id, 0, (size_of::<f32>() * 8) as GLsizei);
         gl::EnableVertexArrayAttrib(vao_id, 1);
-        gl::VertexArrayAttribFormat(
-            vao_id,
-            1,
-            3,
-            gl::FLOAT,
-            gl::FALSE,
-            (size_of::<f32>() * 3) as GLuint,
-        );
+        gl::VertexArrayAttribFormat(vao_id, 1, 3, gl::FLOAT, gl::FALSE, (size_of::<f32>() * 3) as GLuint);
         // UV
         gl::VertexArrayVertexBuffer(vao_id, 2, vbo_id, 0, (size_of::<f32>() * 8) as GLsizei);
         gl::EnableVertexArrayAttrib(vao_id, 2);
-        gl::VertexArrayAttribFormat(
-            vao_id,
-            2,
-            2,
-            gl::FLOAT,
-            gl::FALSE,
-            (size_of::<f32>() * 6) as GLuint,
-        );
+        gl::VertexArrayAttribFormat(vao_id, 2, 2, gl::FLOAT, gl::FALSE, (size_of::<f32>() * 6) as GLuint);
 
         gl::VertexArrayAttribBinding(vao_id, 0, 0);
         gl::VertexArrayAttribBinding(vao_id, 1, 1);
@@ -314,6 +306,35 @@ pub fn callbacks(state: &mut GlState) {
         match event {
             WindowEvent::FramebufferSize(x, y) => {
                 state.frame_dims = (x, y);
+                unsafe {
+                    gl::CreateTextures(gl::TEXTURE_2D, 1, &mut state.offtex);
+                    gl::CreateTextures(gl::TEXTURE_2D, 1, &mut state.off_depth_tex);
+                    gl::CreateTextures(gl::TEXTURE_2D, 1, &mut state.blurtex);
+
+                    gl::TextureParameteri(state.offtex, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+                    gl::TextureParameteri(state.offtex, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
+                    gl::TextureParameteri(state.offtex, gl::TEXTURE_WRAP_S, gl::REPEAT as i32);
+                    gl::TextureParameteri(state.offtex, gl::TEXTURE_WRAP_T, gl::REPEAT as i32);
+
+                    gl::CreateTextures(gl::TEXTURE_2D, 1, &mut state.off_depth_tex);
+                    gl::TextureParameteri(state.off_depth_tex, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
+                    gl::TextureParameteri(state.off_depth_tex, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
+                    gl::TextureParameteri(state.off_depth_tex, gl::TEXTURE_WRAP_S, gl::REPEAT as i32);
+                    gl::TextureParameteri(state.off_depth_tex, gl::TEXTURE_WRAP_T, gl::REPEAT as i32);
+
+                    gl::TextureStorage2D(state.offtex, 1, gl::RGBA32F, state.frame_dims.0, state.frame_dims.1);
+                    gl::TextureStorage2D(
+                        state.off_depth_tex,
+                        1,
+                        gl::DEPTH_COMPONENT32F,
+                        state.frame_dims.0,
+                        state.frame_dims.1,
+                    );
+                    gl::TextureStorage2D(state.blurtex, 1, gl::RGBA32F, state.frame_dims.0, state.frame_dims.1);
+
+                    gl::NamedFramebufferTexture(state.offbo, gl::COLOR_ATTACHMENT0, state.offtex, 0);
+                    gl::NamedFramebufferTexture(state.offbo, gl::DEPTH_ATTACHMENT, state.off_depth_tex, 0);
+                }
             }
             WindowEvent::Key(Key::W, _, Action::Press, _) => {
                 state.wasdsp_pressed[0] = true;
@@ -347,10 +368,7 @@ pub fn callbacks(state: &mut GlState) {
             }
             WindowEvent::CursorPos(x, y) => {
                 let rot_rate = 0.01;
-                let (dx, dy) = (
-                    state.last_cursor_pos.0 - x as f32,
-                    state.last_cursor_pos.1 - y as f32,
-                );
+                let (dx, dy) = (state.last_cursor_pos.0 - x as f32, state.last_cursor_pos.1 - y as f32);
                 state.last_cursor_pos = (x as f32, y as f32);
                 if state.left_click {
                     state
@@ -370,7 +388,7 @@ pub fn callbacks(state: &mut GlState) {
 }
 
 pub fn move_cam(state: &mut GlState) {
-    let move_rate = 0.2;
+    let move_rate = 0.08;
     if state.wasdsp_pressed[0] {
         state.cam_state.pos -= state.cam_state.w * move_rate;
     }
@@ -388,7 +406,9 @@ pub fn move_cam(state: &mut GlState) {
     }
 }
 
-pub fn rotate_cam(state: &mut GlState) {}
+pub trait Render {
+    fn draw(&mut self, state: &GlState);
+}
 
 fn glfw_error_callback(err: glfw::Error, description: String) {
     println!("GLFW error {:?}: {:?}", err, description);
