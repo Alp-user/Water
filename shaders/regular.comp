@@ -8,14 +8,16 @@ layout(local_size_x = 64) in;
 #define CALCULATE_GRAVITY 4
 #define CALCULATE_GHOST_DENSITIES 5
 #define INIT_SIMULATION_STEP 6
+#define FINALIZE_SIMULATION_STEP 7
+#define CALCULATE_BOMB 8
 
-#define MAX_PARTICLES 16384
-#define MAX_GHOST_PARTICLES 16384
-#define MAX_CELLS 32768
+#define MAX_PARTICLES 65536
+#define MAX_GHOST_PARTICLES 65536
+#define MAX_CELLS 65536
 #define INDEX gl_GlobalInvocationID.x
 
 const float PI = 3.14159265358979323846;
-const float MAX_U32 = 4294967295;
+const uint MAX_U32 = 4294967295;
 
 layout(binding = 0, std430) buffer ssbo {
     vec4 positions[MAX_PARTICLES];
@@ -37,20 +39,28 @@ layout(binding = 0, std140) uniform ubo {
     ivec3 grid_lens;
     float patch_size;
     //
+    vec3 bounding_mins;
     int box;
+    //
+    vec3 bounding_maxs;
     float gas_constant;
+    //
     float rest_density;
     float particle_mass;
-    //
     float ghost_particle_mass;
     float viscosity_constant;
+    //
     float gconstant;
     float tension_constant;
-    //
     int calculation_type;
     int particle_count;
+    //
+    vec3 bomb_position;
     int ghost_particle_count;
-    int _padding[1];
+    //
+    int box_bomb;
+    float bomb_constant;
+    int _padding0[2];
 };
 
 ivec3 coord_to_grid(vec3 pos) {
@@ -145,10 +155,17 @@ void calculate_densities() {
     densities[INDEX] = density;
 }
 
+const float dt = 0.01f;
+void finalize_simulation_step() {
+    vec4 acceleration = forces[INDEX] / particle_mass;
+    positions[INDEX] += velocities[INDEX] * dt;
+    velocities[INDEX] += acceleration * dt;
+}
+
 void calculate_ghost_densities() {
     vec3 position = vec3(ghost_positions[INDEX]);
     ivec3 grid_coords = coord_to_grid(position);
-    float h = patch_size * float(box);
+    float h = patch_size * float(box) * sqrt(3); // Might be wrong
     float density = 0.0;
     for (int i = -box; i <= box; i++) {
         for (int j = -box; j <= box; j++) {
@@ -177,7 +194,7 @@ void calculate_ghost_densities() {
 void calculate_pressure() {
     vec3 position = vec3(positions[INDEX]);
     ivec3 grid_coords = coord_to_grid(position);
-    float h = patch_size * float(box);
+    float h = patch_size * float(box) * sqrt(3); // Might be wrong
     vec4 force = vec4(0.0);
     float cpressure = gas_constant * max(densities[INDEX] - rest_density, 0.0);
     for (int i = -box; i <= box; i++) {
@@ -213,7 +230,7 @@ void calculate_pressure() {
 void calculate_viscosity() {
     vec3 position = vec3(positions[INDEX]);
     ivec3 grid_coords = coord_to_grid(position);
-    float h = patch_size * float(box);
+    float h = patch_size * float(box) * sqrt(3); // Might be wrong
     vec4 force = vec4(0.0);
     for (int i = -box; i <= box; i++) {
         for (int j = -box; j <= box; j++) {
@@ -247,7 +264,7 @@ void calculate_viscosity() {
 void calculate_surface_tension() {
     vec3 position = vec3(positions[INDEX]);
     ivec3 grid_coords = coord_to_grid(position);
-    float h = patch_size * float(box);
+    float h = patch_size * float(box) * sqrt(3); // Might be wrong
     vec3 surface_normal = vec3(0.0);
     float curvature_term = 0.0;
     for (int i = -box; i <= box; i++) {
@@ -288,29 +305,68 @@ void calculate_surface_tension() {
     forces[INDEX] += tension_constant * curvature_constant * vec4(surface_normal, 0.0);
 }
 
+void calculate_bomb() {
+    if (INDEX != 0) return;// needs to be executed by one thread
+    vec3 position = bomb_position;
+    ivec3 grid_coords = coord_to_grid(position);
+    for (int i = -box_bomb; i <= box_bomb; i++) {
+        for (int j = -box_bomb; j <= box_bomb; j++) {
+            for (int k = -box_bomb; k <= box_bomb; k++) {
+                ivec3 other_coord = grid_coords + ivec3(i, j, k);
+                if (any(lessThan(other_coord, ivec3(0))) || any(greaterThanEqual(other_coord, grid_lens))) continue;
+                int other_index = hash(other_coord);
+                if (cells[other_index].x != MAX_U32) {
+                    for (int l = int(cells[other_index].x); l <= int(cells[other_index].y); l++) {
+                        uint index = indices[l];
+                        vec3 direction = vec3(positions[index]) - bomb_position;
+                        float magnitude = length(direction);
+                        if (magnitude < 1e-6) continue;
+                        direction = normalize(direction);
+                        vec3 force = direction / magnitude * bomb_constant;
+                        forces[index] += vec4(force, 0.0f);
+                    }
+                }
+            }
+        }
+    }
+}
+
 void main(void) {
-    if (INDEX >= particle_count) return;
     switch (calculation_type) {
         case CALCULATE_DENSITIES:
+        if (INDEX >= particle_count) return;
         calculate_densities();
         break;
         case CALCULATE_PRESSURE:
+        if (INDEX >= particle_count) return;
         calculate_pressure();
         break;
         case CALCULATE_VISCOSITY:
+        if (INDEX >= particle_count) return;
         calculate_viscosity();
         break;
         case CALCULATE_SURFACE_TENSION:
+        if (INDEX >= particle_count) return;
         calculate_surface_tension();
         break;
         case CALCULATE_GRAVITY:
+        if (INDEX >= particle_count) return;
         forces[INDEX] += vec4(0.0, -1.0, 0.0, 0.0) * gconstant * particle_mass;
         break;
         case CALCULATE_GHOST_DENSITIES:
+        if (INDEX >= ghost_particle_count) return;
         calculate_ghost_densities();
         break;
         case INIT_SIMULATION_STEP:
+        if (INDEX >= particle_count) return;
         forces[INDEX] = vec4(0.0f);
+        break;
+        case FINALIZE_SIMULATION_STEP:
+        if (INDEX >= particle_count) return;
+        finalize_simulation_step();
+        break;
+        case CALCULATE_BOMB:
+        calculate_bomb();
         break;
         default:
         break;

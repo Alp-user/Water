@@ -27,7 +27,9 @@ macro_rules! usize {
 }
 #[macro_export]
 macro_rules! u32 {
-    ($e:expr) => {($e as u32)}
+    ($e:expr) => {
+        ($e as u32)
+    };
 }
 
 pub struct Orientation {
@@ -272,7 +274,7 @@ pub fn load_shader(path: &str) -> GLuint {
             gl::VERTEX_SHADER
         } else if path.ends_with(".frag") {
             gl::FRAGMENT_SHADER
-        } else if path.ends_with(".comp"){
+        } else if path.ends_with(".comp") {
             gl::COMPUTE_SHADER
         } else {
             panic!("Unknown shader type for path: {}", path);
@@ -333,6 +335,7 @@ pub fn callbacks(state: &mut GlState) {
         match event {
             WindowEvent::FramebufferSize(x, y) => {
                 state.frame_dims = (x, y);
+                state.window_dims = (x, y);
                 unsafe {
                     gl::CreateTextures(gl::TEXTURE_2D, 1, &mut state.offtex);
                     gl::CreateTextures(gl::TEXTURE_2D, 1, &mut state.off_depth_tex);
@@ -455,6 +458,7 @@ extern "system" fn gl_debug_output(
     if id == 131169 || id == 131185 || id == 131218 || id == 131204 {
         return;
     }
+    if gltype == gl::DEBUG_TYPE_PERFORMANCE { return;}
 
     let message_str = unsafe { CStr::from_ptr(message).to_string_lossy() };
 

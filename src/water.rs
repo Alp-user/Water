@@ -20,6 +20,8 @@ pub enum CalculationType {
     CalculateGravity = 4,
     CalculateGhostDensities = 5,
     InitSimulationStep = 6,
+    FinalizeSimulationStep = 7,
+    CalculateBomb = 8,
 }
 pub enum SSBOType {
     Positions,
@@ -40,20 +42,28 @@ pub struct WaterUbo {
     pub grid_lens: glm::IVec3,
     pub patch_size: f32,
 
+    pub bounding_mins: glm::Vec3,
     pub lbox: i32,
+
+    pub bounding_maxs: glm::Vec3,
     pub gas_constant: f32,
+
     pub rest_density: f32,
     pub particle_mass: f32,
-
     pub ghost_particle_mass: f32,
     pub viscosity_constant: f32,
+
     pub gconstant: f32,
     pub tension_constant: f32,
-
     pub calculation_type: CalculationType,
     pub particle_count: i32,
+
+    pub bomb_position: glm::Vec3,
     pub ghost_particle_count: i32,
-    pub _padding: [i32; 1],
+
+    pub box_bomb: i32,
+    pub bomb_constant: f32,
+    pub _padding0: [i32; 2],
 }
 pub struct Water {
     pub mesh: util::Mesh,
@@ -68,10 +78,12 @@ pub struct Water {
     pub densities: Vec<f32>,
     pub ghost_densities: Vec<f32>,
     pub ghost_rate: i32,
-    pub particle_partition: (i32, i32, i32),
     pub ghost_margin: (i32, i32, i32),
     pub empty_cells_margin: (i32, i32, i32),
-    pub grid_lens: (i32, i32, i32),
+    pub particle_partition: (i32, i32, i32),
+    pub ghost_partition: (i32,i32,i32),
+    pub empty_partition: (i32,i32,i32),
+    pub total_partition: (i32, i32, i32),
     pub particle_count: i32,
     pub particle_mass: f32,
     pub ghost_particle_mass: f32,
@@ -129,10 +141,12 @@ impl Water {
             densities: Vec::new(),
             ghost_densities: Vec::new(),
             particle_partition,
+            ghost_partition: ghost_margin,
+            empty_partition: empty_cells_margin,
             ghost_margin,
             empty_cells_margin,
             particle_count: particle_partition.0 * particle_partition.1 * particle_partition.2, // Default
-            grid_lens: (0, 0, 0),
+            total_partition: (0, 0, 0),
             particle_mass: 0.02,
             ghost_particle_mass: 0.10,
             grid: HashMap::new(),
@@ -162,6 +176,8 @@ impl Water {
                 grid_lens: glm::IVec3::new(0, 0, 0),
                 patch_size: 2.0 * radius,
                 lbox: 2,
+                bounding_maxs: glm::Vec3::new(0.0, 0.0, 0.0),
+                bounding_mins: glm::Vec3::new(0.0, 0.0, 0.0),
                 gas_constant: 0.36,
                 rest_density: 0.0,
                 particle_mass: 0.02,
@@ -172,7 +188,10 @@ impl Water {
                 calculation_type: CalculationType::CalculateDensities,
                 particle_count: 0,
                 ghost_particle_count: 0,
-                _padding: [0; 1],
+                bomb_position: glm::Vec3::new(0.0,0.0,0.0),
+                box_bomb: 7,
+                bomb_constant: 30.0,
+                _padding0: [0; 2],
             },
         };
 
@@ -182,8 +201,8 @@ impl Water {
             particle_partition.2 + ghost_margin.2 * 2 + empty_cells_margin.2 * 2,
         );
         // If 2*radius != patch_size this is wrong!
-        owater.grid_lens = total_particles_partition;
-        owater.water_ubo.grid_lens = glm::IVec3::new(owater.grid_lens.0, owater.grid_lens.1, owater.grid_lens.2);
+        owater.total_partition = total_particles_partition;
+        owater.water_ubo.grid_lens = glm::IVec3::new(owater.total_partition.0, owater.total_partition.1, owater.total_partition.2);
 
         let ghost_range_x_start: (i32, i32) = (0, ghost_margin.0 - 1);
         let ghost_range_x_end: (i32, i32) = (
@@ -224,13 +243,17 @@ impl Water {
                 || k <= empty_range_z_start.1
                 || k >= empty_range_z_end.0
         };
+        let bomb_x = total_particles_partition.0 as f32 / 2.0 * 2.0 * owater.radius;
+        let bomb_z = total_particles_partition.2 as f32 / 2.0 * 2.0 * owater.radius;
+        owater.water_ubo.bomb_position = glm::Vec3::new(bomb_x, 0.5, bomb_z);
 
+        let (mut ipos, mut jpos, mut kpos): (f32, f32, f32) = (0.0, 0.0, 0.0);
         for i in 0..total_particles_partition.0 {
-            let ipos = f32!(i) * 2.0 * owater.radius;
+            ipos = f32!(i) * 2.0 * owater.radius;
             for j in 0..total_particles_partition.1 {
-                let jpos = f32!(j) * 2.0 * owater.radius;
+                jpos = f32!(j) * 2.0 * owater.radius;
                 for k in 0..total_particles_partition.2 {
-                    let kpos = f32!(k) * 2.0 * owater.radius;
+                    kpos = f32!(k) * 2.0 * owater.radius;
                     let new_pos = glm::Vec4::new(ipos, jpos, kpos, 0.0);
                     let index = owater.ghost_positions.len();
 
@@ -256,6 +279,7 @@ impl Water {
                 }
             }
         }
+        owater.water_ubo.bounding_maxs = glm::Vec3::new(ipos, jpos, kpos);
 
         owater.water_ubo.particle_count = i32!(owater.positions.len());
         owater.water_ubo.ghost_particle_count = i32!(owater.ghost_positions.len());
@@ -276,7 +300,7 @@ impl Water {
             gl::VertexArrayBindingDivisor(owater.mesh.vao_id, 3, 1);
             gl::VertexArrayAttribBinding(owater.mesh.vao_id, 3, 3);
         }
-        owater.load_offsets();
+        // owater.load_offsets();
 
         // Ghost grid gpu conversion
         let (gpu_ghost_indices_array, gpu_ghost_cells_array) = owater.transform_hashmap_gpu_grid(&owater.ghost_grid);
@@ -310,7 +334,7 @@ impl Water {
             );
             // Upload ghost positions
             gl::NamedBufferSubData(
-                owater.ssbo,
+                ssbo,
                 COMP_GHOST_POSITIONS_OFFSET as isize,
                 (1 * size_of::<glm::Vec4>() * usize!(owater.water_ubo.ghost_particle_count)) as isize,
                 owater.ghost_positions.as_ptr() as *const c_void,
@@ -318,6 +342,7 @@ impl Water {
             gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, ssbo);
             gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 0, ssbo);
             gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
+            gl::ObjectLabel(gl::BUFFER, ssbo, 4, "SSBO".as_ptr() as *const i8);
         }
         // Debug SSBO
         let mut debug_ssbo: GLuint = 0;
@@ -346,8 +371,10 @@ impl Water {
                 gl::DYNAMIC_STORAGE_BIT,
             );
         }
+
         owater.ssbo = ssbo;
         owater.ubo = ubo;
+        owater.debug_ssbo = debug_ssbo;
         owater.water_ubo.gas_constant = owater.gas_constant;
         owater.water_ubo.gconstant = owater.gconstant;
         owater.water_ubo.ghost_particle_mass = owater.ghost_particle_mass;
@@ -355,6 +382,26 @@ impl Water {
         owater.water_ubo.viscosity_constant = owater.viscosity_constant;
         owater.water_ubo.tension_constant = owater.tension_constant;
         owater
+    }
+    pub fn add_particles(&mut self) {
+        let jpos = 2.0 * self.radius * (self.total_partition.1 - 1) as f32;
+        let starti = self.empty_partition.0 + self.ghost_partition.0;
+        let startk = self.empty_partition.2 + self.ghost_partition.2;
+        let endi = self.total_partition.0 - starti;
+        let endk = self.total_partition.2 - startk;
+        for i in starti..endi {
+            let ipos = f32!(i) * 2.0 * self.radius;
+            for k in startk..endk {
+                let kpos = f32!(k) * 2.0 * self.radius;
+                // println!("({},{},{})", ipos, jpos, kpos);
+                self.positions.push(glm::Vec4::new(ipos, jpos, kpos, 0.0));
+                self.velocities.push(glm::Vec4::new(0.0, 0.0, 0.0, 0.0));
+                self.forces.push(glm::Vec4::new(0.0, 0.0, 0.0, 0.0));
+                self.densities.push(0.0);
+            }
+        }
+        self.particle_count = self.positions.len() as i32;
+        self.water_ubo.particle_count = self.particle_count;
     }
     pub fn print_ubo(&self) {
         let mut dummy: WaterUbo = WaterUbo::default();
@@ -368,20 +415,19 @@ impl Water {
         }
         println!("Ubo: {:?}", dummy);
     }
-    pub fn print_debug_ssbo(&self, length: usize){
-        let data:Vec<glm::IVec4> = vec![glm::IVec4::new(0,0,0,0); length];
+    pub fn print_debug_ssbo(&self, length: usize) {
+        let data: Vec<glm::IVec4> = vec![glm::IVec4::new(0, 0, 0, 0); length];
         unsafe {
             gl::GetNamedBufferSubData(
                 self.debug_ssbo,
                 0,
-                ( length * size_of::<glm::IVec4>() ) as isize,
+                (length * size_of::<glm::IVec4>()) as isize,
                 data.as_ptr() as *mut c_void,
             );
         }
         for vec in data {
             println!("{:?}", vec);
         }
-
     }
 
     pub fn load_grid_ssbo(&self) {
@@ -419,9 +465,9 @@ impl Water {
     ) -> (Vec<u32>, Vec<glm::UVec2>) {
         let mut indices_flattened = Vec::with_capacity(self.positions.len());
         let mut cells = Vec::new();
-        for i in 0..self.grid_lens.0 {
-            for j in 0..self.grid_lens.1 {
-                for k in 0..self.grid_lens.2 {
+        for i in 0..self.total_partition.0 {
+            for j in 0..self.total_partition.1 {
+                for k in 0..self.total_partition.2 {
                     let grid_key = (i, j, k);
                     // let cell_index = k * self.grid_lens.1 * self.grid_lens.0 + j * self.grid_lens.0 + i;
 
@@ -779,7 +825,7 @@ impl Render for Water {
                 glm::value_ptr(&projection).as_ptr(),
             );
             gl::ProgramUniform1i(state.def_vshader_id, 4, i32!(true));
-            gl::ProgramUniform1i(state.def_vshader_id, 5, 1);
+            gl::ProgramUniform1i(state.def_vshader_id, 5, 1); // Mode: Billboard Quad
             gl::ProgramUniform1f(state.def_vshader_id, 6, self.radius);
             gl::ProgramUniform3f(
                 state.def_fshader_id,
@@ -788,7 +834,7 @@ impl Render for Water {
                 state.cam_state.pos.y,
                 state.cam_state.pos.z,
             );
-            gl::ProgramUniform1i(state.def_fshader_id, 1, 3);
+            gl::ProgramUniform1i(state.def_fshader_id, 1, 3); // Mode: Sphere
             gl::ProgramUniform1f(state.def_fshader_id, 3, self.radius);
 
             // Set viewport

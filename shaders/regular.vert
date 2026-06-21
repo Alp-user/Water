@@ -23,11 +23,28 @@ layout(location = 1) out vec3 normal;
 layout(location = 2) out vec2 uv;
 layout(location = 3) out vec3 center;
 
+#define MAX_PARTICLES 65536
+#define MAX_GHOST_PARTICLES 65536
+#define MAX_CELLS 65536
+layout(binding = 0, std430) buffer ssbo {
+    vec4 positions[MAX_PARTICLES];
+    vec4 ghost_positions[MAX_GHOST_PARTICLES];
+    vec4 velocities[MAX_PARTICLES];
+    vec4 forces[MAX_PARTICLES];
+    uvec2 cells[MAX_CELLS];
+    uvec2 ghost_cells[MAX_CELLS];
+    float densities[MAX_PARTICLES];
+    float ghost_densities[MAX_GHOST_PARTICLES];
+    uint indices[MAX_PARTICLES];
+    uint ghost_indices[MAX_GHOST_PARTICLES];
+};
+
 out gl_PerVertex {
     vec4 gl_Position;
 };
 
 void main(void) {
+    vec3 offset = positions[gl_InstanceID].xyz;
     switch (mode) {
         case QUAD:
         {
@@ -48,7 +65,7 @@ void main(void) {
         }
         case BILL_QUAD:
         {
-            vec3 center_view = vec3(view * vec4(in_offset, 1.0f));
+            vec3 center_view = vec3(view * vec4(offset, 1.0f));
             vec3 bottom_left = center_view - vec3(radius, radius, 0.0f);
             center = center_view;
             switch (gl_VertexID) {
@@ -93,7 +110,7 @@ void main(void) {
             uv = in_uv;
             normal = mnormal * in_normal;
             wpos = vec3(model * vec4(pos, 1.0f));
-            if (instanced) wpos += in_offset;
+            if (instanced) wpos += offset;
             gl_Position = projection * view * vec4(wpos, 1.0f);
             break;
         }

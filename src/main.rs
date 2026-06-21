@@ -10,9 +10,9 @@ use util::Render;
 use water::Water;
 
 const LOCAL_WORKGROUP_SIZE: i32 = 64;
-const MAX_PARTICLES: usize = 16384;
-const MAX_GHOST_PARTICLES: usize = 16384;
-const MAX_CELLS: usize = 32768;
+const MAX_PARTICLES: usize = 65536;
+const MAX_GHOST_PARTICLES: usize = 65536;
+const MAX_CELLS: usize = 65536;
 
 const COMP_POSITIONS_OFFSET: usize = 0;
 const COMP_GHOST_POSITIONS_OFFSET: usize = COMP_POSITIONS_OFFSET + COMP_POSITIONS_SIZE;
@@ -84,7 +84,7 @@ fn main() {
         clear_color: [1.0, 1.0, 1.0, 1.0],
         clear_depth: 1.0,
     };
-    state.cam_state.pos = glm::Vec3::new(0.0, 0.0, 10.0);
+    state.cam_state.pos = glm::Vec3::new(4.0, 5.0, 15.0);
     let cursor_pos = state.window.get_cursor_pos();
     state.last_cursor_pos = (f32!(cursor_pos.0), f32!(cursor_pos.1));
 
@@ -138,32 +138,36 @@ fn main() {
         gl::ObjectLabel(gl::TEXTURE, state.off_depth_tex, 3, "dep".as_ptr() as *const i8);
     }
     let mut time = Instant::now();
-    let mut accumulator = 0.0;
-    let mut owater = Water::new((2, 5, 2), (2, 2, 2), (2, 2, 2), 0.1);
-    println!(
-        "Particles:{}, GhostParticles:{}, Cells:{}",
-        owater.positions.len(),
-        owater.ghost_positions.len(),
-        owater.grid_lens.0 * owater.grid_lens.1 * owater.grid_lens.2
-    );
+    let mut simulation_accumulator = 0.0;
+    let mut water_accumulator = 0.0;
+    let mut bomb_accumulator = 0.0;
+    let water_wait_time = 0.5;
+    let bomb_wait_time = 5.0;
+    let mut owater = Water::new((10, 1, 10), (2, 2, 2), (15, 25, 15), 0.1);
     while !state.window.should_close() {
         let time_now = Instant::now();
         let time_elapsed = (time_now - time).as_secs_f32();
         time = time_now;
-        accumulator += time_elapsed;
-        while accumulator > owater.dt {
+        simulation_accumulator += time_elapsed;
+        water_accumulator += time_elapsed;
+        bomb_accumulator += time_elapsed;
+        while simulation_accumulator > owater.dt {
             unsafe {
                 gl::BindProgramPipeline(state.def_pipeline);
+                gl::Viewport(0, 0, state.frame_dims.0, state.frame_dims.1);
                 gl::UseProgramStages(state.def_pipeline, gl::VERTEX_SHADER_BIT, 0);
                 gl::UseProgramStages(state.def_pipeline, gl::FRAGMENT_SHADER_BIT, 0);
                 gl::UseProgramStages(state.def_pipeline, gl::COMPUTE_SHADER_BIT, state.def_cshader_id);
                 owater.water_ubo.particle_count = i32!(owater.positions.len());
                 owater.water_ubo.ghost_particle_count = i32!(owater.ghost_positions.len());
-                let workgroup_count =
+                let workgroup_count_particles =
                     (owater.water_ubo.particle_count + LOCAL_WORKGROUP_SIZE - 1) / LOCAL_WORKGROUP_SIZE;
+                let workgroup_count_ghost_particles =
+                    (owater.water_ubo.ghost_particle_count + LOCAL_WORKGROUP_SIZE - 1) / LOCAL_WORKGROUP_SIZE;
+                // let  workgroup_count_cells =
+                //     (owater.water_ubo. + LOCAL_WORKGROUP_SIZE - 1) / LOCAL_WORKGROUP_SIZE;
 
-
-                // Upload positions
+                // Upload positions to gpu
                 gl::NamedBufferSubData(
                     owater.ssbo,
                     COMP_POSITIONS_OFFSET as isize,
@@ -171,68 +175,68 @@ fn main() {
                     owater.positions.as_ptr() as *const c_void,
                 );
 
+                // Upload grids to gpu
                 owater.load_grid();
                 owater.load_grid_ssbo();
-                owater.init_simulation();
+                // owater.init_simulation();
 
                 owater.set_calculation_type_update_ubo(water::CalculationType::InitSimulationStep);
-                gl::DispatchCompute(u32!(workgroup_count), 1, 1);
-                gl::MemoryBarrier(gl::SHADER_STORAGE_BARRIER_BIT);
-                gl::GetNamedBufferSubData(
-                    owater.ssbo,
-                    COMP_FORCES_OFFSET as isize,
-                    (1 * size_of::<glm::Vec4>() * usize!(owater.water_ubo.particle_count)) as isize,
-                    owater.forces.as_mut_ptr() as *mut c_void,
-                );
+                gl::DispatchCompute(u32!(workgroup_count_particles), 1, 1);
 
-                // owater.set_calculation_type_update_ubo(water::CalculationType::CalculateDensities);
-                // gl::DispatchCompute(u32!(workgroup_count), 1, 1);
-                // gl::MemoryBarrier(gl::SHADER_STORAGE_BARRIER_BIT);
+                owater.set_calculation_type_update_ubo(water::CalculationType::CalculateDensities);
+                gl::DispatchCompute(u32!(workgroup_count_particles), 1, 1);
 
-                // owater.set_calculation_type_update_ubo(water::CalculationType::CalculateGhostDensities);
-                // gl::DispatchCompute(u32!(workgroup_count), 1, 1);
-                // gl::MemoryBarrier(gl::SHADER_STORAGE_BARRIER_BIT);
-                // gl::GetNamedBufferSubData(
-                //     owater.ssbo,
-                //     COMP_DENSITY_OFFSET as isize,
-                //     (1 * size_of::<f32>() * usize!(owater.water_ubo.particle_count)) as isize,
-                //     owater.densities.as_mut_ptr() as *mut c_void,
-                // );
-                // gl::GetNamedBufferSubData(
-                //     owater.ssbo,
-                //     COMP_GHOST_DENSITY_OFFSET as isize,
-                //     (1 * size_of::<f32>() * usize!(owater.water_ubo.ghost_particle_count)) as isize,
-                //     owater.ghost_densities.as_mut_ptr() as *mut c_void,
-                // );
+                owater.set_calculation_type_update_ubo(water::CalculationType::CalculateGhostDensities);
+                gl::DispatchCompute(u32!(workgroup_count_ghost_particles), 1, 1);
 
-                owater.load_densities();
-                println!("{:?}", owater.densities);
-                // owater.load_gravity();
+                gl::MemoryBarrier(gl::ALL_BARRIER_BITS);
 
                 owater.set_calculation_type_update_ubo(water::CalculationType::CalculateGravity);
-                gl::DispatchCompute(u32!(workgroup_count), 1, 1);
-                gl::MemoryBarrier(gl::SHADER_STORAGE_BARRIER_BIT);
+                gl::DispatchCompute(u32!(workgroup_count_particles), 1, 1);
+                gl::MemoryBarrier(gl::ALL_BARRIER_BITS);
 
-                // owater.set_calculation_type_update_ubo(water::CalculationType::CalculatePressure);
-                // gl::DispatchCompute(u32!(workgroup_count), 1, 1);
-                // gl::MemoryBarrier(gl::SHADER_STORAGE_BARRIER_BIT);
+                owater.set_calculation_type_update_ubo(water::CalculationType::CalculatePressure);
+                gl::DispatchCompute(u32!(workgroup_count_particles), 1, 1);
+                gl::MemoryBarrier(gl::ALL_BARRIER_BITS);
+
+                owater.set_calculation_type_update_ubo(water::CalculationType::CalculateViscosity);
+                gl::DispatchCompute(u32!(workgroup_count_particles), 1, 1);
+                gl::MemoryBarrier(gl::ALL_BARRIER_BITS);
+
+                owater.set_calculation_type_update_ubo(water::CalculationType::CalculateSurfaceTension);
+                gl::DispatchCompute(u32!(workgroup_count_particles), 1, 1);
+                gl::MemoryBarrier(gl::ALL_BARRIER_BITS);
+
+                if bomb_accumulator >= bomb_wait_time {
+                    bomb_accumulator = 0.0;
+                    owater.print_ubo();
+                    println!("BOOM!");
+                    owater.set_calculation_type_update_ubo(water::CalculationType::CalculateBomb);
+                    gl::DispatchCompute(1, 1, 1);
+                    gl::MemoryBarrier(gl::ALL_BARRIER_BITS);
+                }
+
+                owater.set_calculation_type_update_ubo(water::CalculationType::FinalizeSimulationStep);
+                gl::DispatchCompute(u32!(workgroup_count_particles), 1, 1);
+                gl::MemoryBarrier(gl::ALL_BARRIER_BITS);
+
                 gl::GetNamedBufferSubData(
                     owater.ssbo,
-                    COMP_FORCES_OFFSET as isize,
-                    (1 * size_of::<glm::Vec4>() * usize!(owater.water_ubo.particle_count)) as isize,
-                    owater.forces.as_mut_ptr() as *mut c_void,
+                    COMP_POSITIONS_OFFSET as isize,
+                    (owater.water_ubo.particle_count as usize * size_of::<glm::Vec4>()) as isize,
+                    owater.positions.as_mut_ptr() as *mut c_void,
                 );
-
-                owater.load_pressure();
-                owater.load_viscosity();
-                owater.load_surface_tension();
-                owater.simulate();
-                owater.load_offsets();
+                // owater.load_offsets();
 
                 gl::UseProgramStages(state.def_pipeline, gl::VERTEX_SHADER_BIT, state.def_vshader_id);
                 gl::UseProgramStages(state.def_pipeline, gl::FRAGMENT_SHADER_BIT, state.def_fshader_id);
             }
-            accumulator -= owater.dt;
+            simulation_accumulator -= owater.dt;
+        }
+        if water_accumulator >= water_wait_time {
+            water_accumulator = 0.0;
+            println!("Particle Count: {}", owater.particle_count);
+            owater.add_particles();
         }
         unsafe {
             gl::Enable(gl::DEPTH_TEST);
@@ -246,8 +250,8 @@ fn main() {
             gl::ClearNamedFramebufferfv(state.offbo, gl::DEPTH, 0, &state.clear_depth);
             gl::ActiveTexture(gl::TEXTURE0);
             gl::BindTexture(gl::TEXTURE_2D, state.offtex);
-            gl::ProgramUniform1i(state.def_vshader_id, 5, 0);
-            gl::ProgramUniform1i(state.def_fshader_id, 1, 1);
+            gl::ProgramUniform1i(state.def_vshader_id, 5, 0); // Mode: Fullscreen Quad
+            gl::ProgramUniform1i(state.def_fshader_id, 1, 1); // Mode: Horizontal Blur Pass
             gl::ProgramUniform1f(
                 state.def_fshader_id,
                 5,
@@ -285,8 +289,8 @@ fn main() {
             gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
             gl::ClearNamedFramebufferfv(0, gl::COLOR, 0, state.clear_color.as_ptr());
             gl::ClearNamedFramebufferfv(0, gl::DEPTH, 0, &state.clear_depth);
-            gl::ProgramUniform1i(state.def_vshader_id, 5, 3);
-            gl::ProgramUniform1i(state.def_fshader_id, 1, 4);
+            gl::ProgramUniform1i(state.def_vshader_id, 5, 3); // Mode: Unproject Quad (Generating rays at view space)
+            gl::ProgramUniform1i(state.def_fshader_id, 1, 4); // Mode: Actual Rendering
             gl::ProgramUniform3f(state.def_fshader_id, 7, light_dir.x, light_dir.y, light_dir.z);
             gl::ProgramUniformMatrix4fv(
                 state.def_fshader_id,
