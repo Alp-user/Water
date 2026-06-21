@@ -1,0 +1,318 @@
+#version 460
+layout(local_size_x = 64) in;
+
+#define CALCULATE_DENSITIES 0
+#define CALCULATE_PRESSURE 1
+#define CALCULATE_VISCOSITY 2
+#define CALCULATE_SURFACE_TENSION 3
+#define CALCULATE_GRAVITY 4
+#define CALCULATE_GHOST_DENSITIES 5
+#define INIT_SIMULATION_STEP 6
+
+#define MAX_PARTICLES 16384
+#define MAX_GHOST_PARTICLES 16384
+#define MAX_CELLS 32768
+#define INDEX gl_GlobalInvocationID.x
+
+const float PI = 3.14159265358979323846;
+const float MAX_U32 = 4294967295;
+
+layout(binding = 0, std430) buffer ssbo {
+    vec4 positions[MAX_PARTICLES];
+    vec4 ghost_positions[MAX_GHOST_PARTICLES];
+    vec4 velocities[MAX_PARTICLES];
+    vec4 forces[MAX_PARTICLES];
+    uvec2 cells[MAX_CELLS];
+    uvec2 ghost_cells[MAX_CELLS];
+    float densities[MAX_PARTICLES];
+    float ghost_densities[MAX_GHOST_PARTICLES];
+    uint indices[MAX_PARTICLES];
+    uint ghost_indices[MAX_GHOST_PARTICLES];
+};
+layout(binding = 1, std430) buffer debug_ssbo {
+    ivec4 coords[];
+};
+layout(binding = 0, std140) uniform ubo {
+    // 16 byte boundaries
+    ivec3 grid_lens;
+    float patch_size;
+    //
+    int box;
+    float gas_constant;
+    float rest_density;
+    float particle_mass;
+    //
+    float ghost_particle_mass;
+    float viscosity_constant;
+    float gconstant;
+    float tension_constant;
+    //
+    int calculation_type;
+    int particle_count;
+    int ghost_particle_count;
+    int _padding[1];
+};
+
+ivec3 coord_to_grid(vec3 pos) {
+    float x = pos.x / patch_size;
+    float y = pos.y / patch_size;
+    float z = pos.z / patch_size;
+    return ivec3(x, y, z);
+}
+
+int hash(ivec3 grid_coord) {
+    return grid_coord.x * grid_lens.y * grid_lens.z + grid_coord.y * grid_lens.z + grid_coord.z;
+}
+
+float poly6(vec3 r, float h) {
+    float r2 = dot(r, r);
+    float h2 = h * h;
+    if (r2 > h2) {
+        return 0.0;
+    }
+    float diff = h2 - r2;
+    float coeff = 315.0 / (64.0 * PI * pow(h, 9.0));
+    return coeff * diff * diff * diff;
+}
+
+vec3 poly6_gradient(vec3 r, float h) {
+    float r2 = dot(r, r);
+    float h2 = h * h;
+    if (r2 > h2) {
+        return vec3(0.0);
+    }
+    float diff = h2 - r2;
+    float coeff = -6.0 * 315.0 / (64.0 * PI * pow(h, 9.0));
+    return r * (coeff * diff * diff);
+}
+
+float poly6_laplacian(vec3 r, float h) {
+    float r2 = dot(r, r);
+    float h2 = h * h;
+    if (r2 > h2) {
+        return 0.0;
+    }
+    float diff = h2 - r2;
+    float coeff = 6.0 * 315.0 / (64.0 * PI * pow(h, 9.0));
+    return coeff * diff * (7.0 * r2 - 3.0 * h2);
+}
+
+vec3 spiky_gradient(vec3 r, float h) {
+    float len = length(r);
+    if (len > h || len < 1e-6) {
+        return vec3(0.0);
+    }
+    float diff = h - len;
+    float coeff = -45.0 / (PI * pow(h, 6.0));
+    return r * (coeff * diff * diff / len);
+}
+
+float viscosity_laplacian(vec3 r, float h) {
+    float len = length(r);
+    if (len > h) {
+        return 0.0;
+    }
+    float coeff = 45.0 / (PI * pow(h, 5.0));
+    return coeff * (1.0 - len / h);
+}
+
+void calculate_densities() {
+    vec3 position = vec3(positions[INDEX]);
+    ivec3 grid_coords = coord_to_grid(position);
+    float h = patch_size * float(box) * sqrt(3); // Might be wrong
+    float density = 0.0;
+    for (int i = -box; i <= box; i++) {
+        for (int j = -box; j <= box; j++) {
+            for (int k = -box; k <= box; k++) {
+                ivec3 other_coord = grid_coords + ivec3(i, j, k);
+                if (any(lessThan(other_coord, ivec3(0))) || any(greaterThanEqual(other_coord, grid_lens))) continue;
+                int other_index = hash(other_coord);
+                if (cells[other_index].x != MAX_U32) {
+                    for (int l = int(cells[other_index].x); l <= int(cells[other_index].y); l++) {
+                        uint index = indices[l];
+                        density += poly6(vec3(positions[INDEX] - positions[index]), h) * particle_mass;
+                    }
+                }
+                if (ghost_cells[other_index].x != MAX_U32) {
+                    for (int l = int(ghost_cells[other_index].x); l <= int(ghost_cells[other_index].y); l++) {
+                        uint index = ghost_indices[l];
+                        density += poly6(vec3(positions[INDEX] - ghost_positions[index]), h) * ghost_particle_mass;
+                    }
+                }
+            }
+        }
+    }
+    densities[INDEX] = density;
+}
+
+void calculate_ghost_densities() {
+    vec3 position = vec3(ghost_positions[INDEX]);
+    ivec3 grid_coords = coord_to_grid(position);
+    float h = patch_size * float(box);
+    float density = 0.0;
+    for (int i = -box; i <= box; i++) {
+        for (int j = -box; j <= box; j++) {
+            for (int k = -box; k <= box; k++) {
+                ivec3 other_coord = grid_coords + ivec3(i, j, k);
+                if (any(lessThan(other_coord, ivec3(0))) || any(greaterThanEqual(other_coord, grid_lens))) continue;
+                int other_index = hash(other_coord);
+                if (cells[other_index].x != MAX_U32) {
+                    for (int l = int(cells[other_index].x); l <= int(cells[other_index].y); l++) {
+                        uint index = indices[l];
+                        density += poly6(vec3(ghost_positions[INDEX] - positions[index]), h) * particle_mass;
+                    }
+                }
+                if (ghost_cells[other_index].x != MAX_U32) {
+                    for (int l = int(ghost_cells[other_index].x); l <= int(ghost_cells[other_index].y); l++) {
+                        uint index = ghost_indices[l];
+                        density += poly6(vec3(ghost_positions[INDEX] - ghost_positions[index]), h) * ghost_particle_mass;
+                    }
+                }
+            }
+        }
+    }
+    ghost_densities[INDEX] = density;
+}
+
+void calculate_pressure() {
+    vec3 position = vec3(positions[INDEX]);
+    ivec3 grid_coords = coord_to_grid(position);
+    float h = patch_size * float(box);
+    vec4 force = vec4(0.0);
+    float cpressure = gas_constant * max(densities[INDEX] - rest_density, 0.0);
+    for (int i = -box; i <= box; i++) {
+        for (int j = -box; j <= box; j++) {
+            for (int k = -box; k <= box; k++) {
+                ivec3 other_coord = grid_coords + ivec3(i, j, k);
+                if (any(lessThan(other_coord, ivec3(0))) || any(greaterThanEqual(other_coord, grid_lens))) continue;
+                int other_index = hash(other_coord);
+                if (cells[other_index].x != MAX_U32) {
+                    for (int l = int(cells[other_index].x); l <= int(cells[other_index].y); l++) {
+                        uint index = indices[l];
+                        vec3 inside_result = particle_mass * spiky_gradient(vec3(positions[INDEX] - positions[index]), h);
+                        float opressure = gas_constant * max(densities[index] - rest_density, 0.0);
+                        inside_result *= (cpressure + opressure) / (2.0 * densities[index]);
+                        force -= vec4(inside_result, 0.0);
+                    }
+                }
+                if (ghost_cells[other_index].x != MAX_U32) {
+                    for (int l = int(ghost_cells[other_index].x); l <= int(ghost_cells[other_index].y); l++) {
+                        uint index = ghost_indices[l];
+                        vec3 inside_result = ghost_particle_mass * spiky_gradient(vec3(positions[INDEX] - ghost_positions[index]), h);
+                        float opressure = gas_constant * max(ghost_densities[index].x - rest_density, 0.0);
+                        inside_result *= (cpressure + opressure) / (2.0 * ghost_densities[index].x);
+                        force -= vec4(inside_result, 0.0);
+                    }
+                }
+            }
+        }
+    }
+    forces[INDEX] += force;
+}
+
+void calculate_viscosity() {
+    vec3 position = vec3(positions[INDEX]);
+    ivec3 grid_coords = coord_to_grid(position);
+    float h = patch_size * float(box);
+    vec4 force = vec4(0.0);
+    for (int i = -box; i <= box; i++) {
+        for (int j = -box; j <= box; j++) {
+            for (int k = -box; k <= box; k++) {
+                ivec3 other_coord = grid_coords + ivec3(i, j, k);
+                if (any(lessThan(other_coord, ivec3(0))) || any(greaterThanEqual(other_coord, grid_lens))) continue;
+                int other_index = hash(other_coord);
+                if (cells[other_index].x != MAX_U32) {
+                    for (int l = int(cells[other_index].x); l <= int(cells[other_index].y); l++) {
+                        uint index = indices[l];
+                        float inside_result = viscosity_laplacian(vec3(positions[INDEX] - positions[index]), h);
+                        vec3 inside_force = vec3(velocities[index] - velocities[INDEX]) / densities[index];
+                        force += vec4(inside_result * inside_force * particle_mass, 0.0);
+                    }
+                }
+                if (ghost_cells[other_index].x != MAX_U32) {
+                    for (int l = int(ghost_cells[other_index].x); l <= int(ghost_cells[other_index].y); l++) {
+                        uint index = ghost_indices[l];
+                        float inside_result = viscosity_laplacian(vec3(positions[INDEX] - ghost_positions[index]), h);
+                        vec3 inside_force = -vec3(velocities[INDEX]) / ghost_densities[index].x * ghost_particle_mass;
+                        force += vec4(inside_result * inside_force, 0.0);
+                    }
+                }
+            }
+        }
+    }
+    force *= viscosity_constant;
+    forces[INDEX] += force;
+}
+
+void calculate_surface_tension() {
+    vec3 position = vec3(positions[INDEX]);
+    ivec3 grid_coords = coord_to_grid(position);
+    float h = patch_size * float(box);
+    vec3 surface_normal = vec3(0.0);
+    float curvature_term = 0.0;
+    for (int i = -box; i <= box; i++) {
+        for (int j = -box; j <= box; j++) {
+            for (int k = -box; k <= box; k++) {
+                ivec3 other_coord = grid_coords + ivec3(i, j, k);
+                if (any(lessThan(other_coord, ivec3(0))) || any(greaterThanEqual(other_coord, grid_lens))) continue;
+                int other_index = hash(other_coord);
+                if (cells[other_index].x != MAX_U32) {
+                    for (int l = int(cells[other_index].x); l <= int(cells[other_index].y); l++) {
+                        uint index = indices[l];
+                        surface_normal += particle_mass
+                                * (1.0 / densities[index])
+                                * poly6_gradient(vec3(positions[INDEX] - positions[index]), h);
+                        curvature_term += particle_mass
+                                * (1.0 / densities[index])
+                                * poly6_laplacian(vec3(positions[INDEX] - positions[index]), h);
+                    }
+                }
+                if (ghost_cells[other_index].x != MAX_U32) {
+                    for (int l = int(ghost_cells[other_index].x); l <= int(ghost_cells[other_index].y); l++) {
+                        uint index = ghost_indices[l];
+                        surface_normal += ghost_particle_mass
+                                * (1.0 / ghost_densities[index].x)
+                                * poly6_gradient(vec3(positions[INDEX] - ghost_positions[index]), h);
+                        curvature_term += ghost_particle_mass
+                                * (1.0 / ghost_densities[index].x)
+                                * poly6_laplacian(vec3(positions[INDEX] - ghost_positions[index]), h);
+                    }
+                }
+            }
+        }
+    }
+    if (length(surface_normal) < h * 0.1) {
+        return;
+    }
+    float curvature_constant = -curvature_term / length(surface_normal);
+    forces[INDEX] += tension_constant * curvature_constant * vec4(surface_normal, 0.0);
+}
+
+void main(void) {
+    if (INDEX >= particle_count) return;
+    switch (calculation_type) {
+        case CALCULATE_DENSITIES:
+        calculate_densities();
+        break;
+        case CALCULATE_PRESSURE:
+        calculate_pressure();
+        break;
+        case CALCULATE_VISCOSITY:
+        calculate_viscosity();
+        break;
+        case CALCULATE_SURFACE_TENSION:
+        calculate_surface_tension();
+        break;
+        case CALCULATE_GRAVITY:
+        forces[INDEX] += vec4(0.0, -1.0, 0.0, 0.0) * gconstant * particle_mass;
+        break;
+        case CALCULATE_GHOST_DENSITIES:
+        calculate_ghost_densities();
+        break;
+        case INIT_SIMULATION_STEP:
+        forces[INDEX] = vec4(0.0f);
+        break;
+        default:
+        break;
+    }
+}

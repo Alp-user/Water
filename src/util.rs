@@ -7,8 +7,28 @@ use std::{
     fs::File,
     io::{BufRead, BufReader},
     mem::size_of,
-    path::Path,
 };
+
+#[macro_export]
+macro_rules! f32 {
+    ($e:expr) => {
+        ($e as f32)
+    };
+}
+#[macro_export]
+macro_rules! i32 {
+    ($e:expr) => {
+        ($e as i32)
+    };
+}
+#[macro_export]
+macro_rules! usize {
+    ($e:expr) => {($e as usize)}
+}
+#[macro_export]
+macro_rules! u32 {
+    ($e:expr) => {($e as u32)}
+}
 
 pub struct Orientation {
     pub u: glm::Vec3,
@@ -62,6 +82,7 @@ pub struct GlState {
     pub last_cursor_pos: (f32, f32),
     pub def_vshader_id: GLuint,
     pub def_fshader_id: GLuint,
+    pub def_cshader_id: GLuint,
     pub def_pipeline: GLuint,
     pub offbo: GLuint,
     pub offtex: GLuint,
@@ -88,7 +109,7 @@ pub fn setup_glfw() -> (glfw::Glfw, glfw::PWindow, glfw::GlfwReceiver<(f64, glfw
     // Request debug context
 
     let (mut window, events) = glfw
-        .create_window(500, 500, "water", glfw::WindowMode::Windowed)
+        .create_window(1000, 1000, "water", glfw::WindowMode::Windowed)
         .expect("Failed to create GLFW window.");
 
     window.make_current();
@@ -97,7 +118,11 @@ pub fn setup_glfw() -> (glfw::Glfw, glfw::PWindow, glfw::GlfwReceiver<(f64, glfw
     window.set_mouse_button_polling(true);
     window.set_cursor_pos_polling(true);
     // Load OpenGL functions
-    gl::load_with(|symbol| window.get_proc_address(symbol).map_or(std::ptr::null(), |p| p as *const _));
+    gl::load_with(|symbol| {
+        window
+            .get_proc_address(symbol)
+            .map_or(std::ptr::null(), |p| p as *const _)
+    });
     // Set debug context
     unsafe {
         // Callback is called immediately when an error happens
@@ -169,9 +194,9 @@ pub fn init_mesh(path: &str) -> Mesh {
         let idx = if let Some(&idx) = triple_to_index.get(&triple) {
             idx
         } else {
-            let pos = v[(vi - 1) as usize];
-            let normal = vn[(vni - 1) as usize];
-            let uv = vt[(vti - 1) as usize];
+            let pos = v[usize!((vi - 1))];
+            let normal = vn[usize!((vni - 1))];
+            let uv = vt[usize!((vti - 1))];
             vertices.push(pos.0);
             vertices.push(pos.1);
             vertices.push(pos.2);
@@ -247,6 +272,8 @@ pub fn load_shader(path: &str) -> GLuint {
             gl::VERTEX_SHADER
         } else if path.ends_with(".frag") {
             gl::FRAGMENT_SHADER
+        } else if path.ends_with(".comp"){
+            gl::COMPUTE_SHADER
         } else {
             panic!("Unknown shader type for path: {}", path);
         };
@@ -264,7 +291,7 @@ pub fn load_shader(path: &str) -> GLuint {
 
             let mut err_len: GLint = 0;
             gl::GetShaderiv(shader_id, gl::INFO_LOG_LENGTH, &mut err_len);
-            let mut err_log: Vec<i8> = vec![0; err_len as usize + 1];
+            let mut err_log: Vec<i8> = vec![0; usize!(err_len) + 1];
             gl::GetShaderInfoLog(shader_id, err_len, &mut err_len, err_log.as_mut_ptr());
 
             let err_str = CStr::from_ptr(err_log.as_ptr()).to_string_lossy();
@@ -285,7 +312,7 @@ pub fn load_shader(path: &str) -> GLuint {
 
             let mut err_len: GLint = 0;
             gl::GetProgramiv(program_id, gl::INFO_LOG_LENGTH, &mut err_len);
-            let mut err_log: Vec<i8> = vec![0; err_len as usize + 1];
+            let mut err_log: Vec<i8> = vec![0; usize!(err_len) + 1];
             gl::GetProgramInfoLog(program_id, err_len, &mut err_len, err_log.as_mut_ptr());
 
             let err_str = CStr::from_ptr(err_log.as_ptr()).to_string_lossy();
@@ -311,16 +338,16 @@ pub fn callbacks(state: &mut GlState) {
                     gl::CreateTextures(gl::TEXTURE_2D, 1, &mut state.off_depth_tex);
                     gl::CreateTextures(gl::TEXTURE_2D, 1, &mut state.blurtex);
 
-                    gl::TextureParameteri(state.offtex, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
-                    gl::TextureParameteri(state.offtex, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
-                    gl::TextureParameteri(state.offtex, gl::TEXTURE_WRAP_S, gl::REPEAT as i32);
-                    gl::TextureParameteri(state.offtex, gl::TEXTURE_WRAP_T, gl::REPEAT as i32);
+                    gl::TextureParameteri(state.offtex, gl::TEXTURE_MIN_FILTER, i32!(gl::LINEAR));
+                    gl::TextureParameteri(state.offtex, gl::TEXTURE_MAG_FILTER, i32!(gl::NEAREST));
+                    gl::TextureParameteri(state.offtex, gl::TEXTURE_WRAP_S, i32!(gl::REPEAT));
+                    gl::TextureParameteri(state.offtex, gl::TEXTURE_WRAP_T, i32!(gl::REPEAT));
 
                     gl::CreateTextures(gl::TEXTURE_2D, 1, &mut state.off_depth_tex);
-                    gl::TextureParameteri(state.off_depth_tex, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
-                    gl::TextureParameteri(state.off_depth_tex, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
-                    gl::TextureParameteri(state.off_depth_tex, gl::TEXTURE_WRAP_S, gl::REPEAT as i32);
-                    gl::TextureParameteri(state.off_depth_tex, gl::TEXTURE_WRAP_T, gl::REPEAT as i32);
+                    gl::TextureParameteri(state.off_depth_tex, gl::TEXTURE_MIN_FILTER, i32!(gl::NEAREST));
+                    gl::TextureParameteri(state.off_depth_tex, gl::TEXTURE_MAG_FILTER, i32!(gl::NEAREST));
+                    gl::TextureParameteri(state.off_depth_tex, gl::TEXTURE_WRAP_S, i32!(gl::REPEAT));
+                    gl::TextureParameteri(state.off_depth_tex, gl::TEXTURE_WRAP_T, i32!(gl::REPEAT));
 
                     gl::TextureStorage2D(state.offtex, 1, gl::RGBA32F, state.frame_dims.0, state.frame_dims.1);
                     gl::TextureStorage2D(
@@ -368,8 +395,8 @@ pub fn callbacks(state: &mut GlState) {
             }
             WindowEvent::CursorPos(x, y) => {
                 let rot_rate = 0.01;
-                let (dx, dy) = (state.last_cursor_pos.0 - x as f32, state.last_cursor_pos.1 - y as f32);
-                state.last_cursor_pos = (x as f32, y as f32);
+                let (dx, dy) = (state.last_cursor_pos.0 - f32!(x), state.last_cursor_pos.1 - f32!(y));
+                state.last_cursor_pos = (f32!(x), f32!(y));
                 if state.left_click {
                     state
                         .cam_state

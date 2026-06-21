@@ -23,88 +23,95 @@ layout(location = 1) out vec3 normal;
 layout(location = 2) out vec2 uv;
 layout(location = 3) out vec3 center;
 
-
-out gl_PerVertex{
+out gl_PerVertex {
     vec4 gl_Position;
 };
 
-void main(void){
-    switch(mode){
-        case QUAD:{
+void main(void) {
+    switch (mode) {
+        case QUAD:
+        {
             vec3 vertices[3] = {
-                vec3( -1.0f, 3.0f, -1.0f ),
-                vec3( -1.0f, -1.0f, -1.0f ),
-                vec3( 3.0f, -1.0f, -1.0f )
-            };
+                    vec3(-1.0f, 3.0f, -1.0f),
+                    vec3(-1.0f, -1.0f, -1.0f),
+                    vec3(3.0f, -1.0f, -1.0f)
+                };
             vec2 uvs[3] = {
-                vec2( 0.0f, 2.0f ),
-                vec2( 0.0f, 0.0f ),
-                vec2( 2.0f, 0.0f )
-            };
+                    vec2(0.0f, 2.0f),
+                    vec2(0.0f, 0.0f),
+                    vec2(2.0f, 0.0f)
+                };
             wpos = vertices[gl_VertexID];
             uv = uvs[gl_VertexID];
             gl_Position = vec4(vertices[gl_VertexID], 1.0f);
             break;
         }
-        case BILL_QUAD:{
+        case BILL_QUAD:
+        {
             vec3 center_view = vec3(view * vec4(in_offset, 1.0f));
             vec3 bottom_left = center_view - vec3(radius, radius, 0.0f);
             center = center_view;
-            switch(gl_VertexID){
+            switch (gl_VertexID) {
                 case 5:
-                case 0:{
-                    uv = vec2(0,1);
+                case 0:
+                {
+                    uv = vec2(0, 1);
                     vec3 top_left = bottom_left + vec3(0.0f, 2.0f * radius, 0.0f);
                     wpos = top_left;
-                    gl_Position = projection * vec4(top_left,1.0f);
+                    gl_Position = projection * vec4(top_left, 1.0f);
                     break;
                 }
-                case 1:{
-                    uv = vec2(0,0);
+                case 1:
+                {
+                    uv = vec2(0, 0);
                     wpos = bottom_left;
-                    gl_Position = projection * vec4(bottom_left,1.0f);
+                    gl_Position = projection * vec4(bottom_left, 1.0f);
                     break;
                 }
                 case 3:
-                case 2:{
-                    uv = vec2(1,0);
+                case 2:
+                {
+                    uv = vec2(1, 0);
                     vec3 bottom_right = bottom_left + vec3(2.0f * radius, 0.0f, 0.0f);
                     wpos = bottom_right;
-                    gl_Position = projection * vec4(bottom_right,1.0f);
+                    gl_Position = projection * vec4(bottom_right, 1.0f);
                     break;
                 }
-                case 4:{
-                    uv = vec2(1,1);
+                case 4:
+                {
+                    uv = vec2(1, 1);
                     vec3 top_right = bottom_left + vec3(2.0f * radius, 2.0f * radius, 0.0f);
                     wpos = top_right;
-                    gl_Position = projection * vec4(top_right,1.0f);
+                    gl_Position = projection * vec4(top_right, 1.0f);
                     break;
                 }
             }
             break;
         }
-        case NORMAL:{
+        case NORMAL:
+        {
             uv = in_uv;
             normal = mnormal * in_normal;
             wpos = vec3(model * vec4(pos, 1.0f));
-            if(instanced) wpos += in_offset;
+            if (instanced) wpos += in_offset;
             gl_Position = projection * view * vec4(wpos, 1.0f);
             break;
         }
-        case UNPROJECT_QUAD:{
+        case UNPROJECT_QUAD:
+        {
             vec3 vertices[3] = {
-                vec3( -1.0f, 3.0f, -1.0f ),
-                vec3( -1.0f, -1.0f, -1.0f ),
-                vec3( 3.0f, -1.0f, -1.0f )
-            };
+                    vec3(-1.0f, 3.0f, -1.0f),
+                    vec3(-1.0f, -1.0f, -1.0f),
+                    vec3(3.0f, -1.0f, -1.0f)
+                };
             vec2 uvs[3] = {
-                vec2( 0.0f, 2.0f ),
-                vec2( 0.0f, 0.0f ),
-                vec2( 2.0f, 0.0f )
-            };
+                    vec2(0.0f, 2.0f),
+                    vec2(0.0f, 0.0f),
+                    vec2(2.0f, 0.0f)
+                };
             vec4 view_first = inv_projection * vec4(vertices[gl_VertexID], 1.0f);
-            wpos = view_first.xyz / view_first.w; 
-            wpos = wpos / abs(wpos.z);// z = 1.0f so that now multiplying by depth gives the view location
+            wpos = view_first.xyz / view_first.w;
+            wpos = wpos / abs(wpos.z); // z = 1.0f so that now multiplying by depth gives the view location
             uv = uvs[gl_VertexID];
             gl_Position = vec4(vertices[gl_VertexID], 1.0f);
             break;
